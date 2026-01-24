@@ -12,7 +12,8 @@ CDP_VERSION_URL = "http://127.0.0.1:9222/json/version"
 QUERIES_FILE = "query.txt"
 
 # windows terminal
-#> & "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --remote-debugging-port=9222 --remote-debugging-address=127.0.0.1 --user-data-dir="$env:LOCALAPPDATA\Microsoft\Edge\User Data"  "https://www.bing.com"
+
+#> & "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --remote-debugging-port=9222 --remote-debugging-address=127.0.0.1 --user-data-dir="$env:LOCALAPPDATA\Microsoft\Edge\User Data" --profile-directory="Profile 2" "https://www.bing.com"
 #> taskkill /IM msedge.exe /F
 
 SEARCH_BOX = (
@@ -259,3 +260,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
