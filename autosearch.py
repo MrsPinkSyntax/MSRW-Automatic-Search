@@ -159,6 +159,7 @@ async def ensure_bing_ready(page):
         await maybe_handle_cookies(page)
         return await get_box(15000)
 
+#todo fix mobile emulation
 async def apply_mobile_emulation(page):
     """
     Apply mobile emulation *on the same logged-in profile* using CDP.
@@ -258,5 +259,6 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
