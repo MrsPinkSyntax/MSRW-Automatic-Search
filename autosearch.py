@@ -201,7 +201,6 @@ async def run_searches(label: str, page, queries: list[str], count: int):
             await box.type(q, delay=random.randint(TYPE_DELAY_MIN_MS, TYPE_DELAY_MAX_MS))
             await box.press("Enter")
 
-            # Wait results (or fallback)
             try:
                 await page.wait_for_selector("li.b_algo, #b_results", timeout=15000)
             except PWTimeoutError:
@@ -211,7 +210,6 @@ async def run_searches(label: str, page, queries: list[str], count: int):
             q_enc = quote_plus(q)
             expected_fragment = f"q={q_enc}"
 
-            # If it didn't really navigate/search, force the search URL
             if (after_url == before_url) or ("bing.com/search" not in after_url) or (expected_fragment not in after_url):
                 search_url = f"https://www.bing.com/search?q={q_enc}"
                 await page.goto(search_url, wait_until="domcontentloaded")
@@ -260,4 +258,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
