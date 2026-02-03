@@ -1,7 +1,5 @@
 CURRENT VERSION 2.0
-
 --> fix on profile bug
-
 --> update on multiple search profile
 
 Versione semplice di ricerca automatica su bing.
