@@ -1,6 +1,8 @@
 import asyncio
 import json
+import os
 import random
+import subprocess
 import time
 from pathlib import Path
 from urllib.request import urlopen
@@ -8,13 +10,22 @@ from urllib.parse import quote_plus
 
 from playwright.async_api import async_playwright, TimeoutError as PWTimeoutError
 
-CDP_VERSION_URL = "http://127.0.0.1:9222/json/version"
+# ======================
+# CONFIG
+# ======================
+
+EDGE_EXE = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+PORT = 9222
+CDP_ADDR = "127.0.0.1"
+
+# Se vuoi usare i PROFILI REALI di Edge, lascia così:
+REAL_EDGE_USER_DATA_DIR = os.path.join(os.environ["LOCALAPPDATA"], r"Microsoft\Edge\User Data")
+
+# Se invece vuoi una sessione "pulita" dedicata all'automazione (più stabile),
+# commenta la riga sopra e usa questa:
+# REAL_EDGE_USER_DATA_DIR = os.path.join(os.environ["LOCALAPPDATA"], r"EdgeCDP_Automation")
+
 QUERIES_FILE = "query.txt"
-
-# windows terminal
-
-#> & "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --remote-debugging-port=9222 --remote-debugging-address=127.0.0.1 --user-data-dir="$env:LOCALAPPDATA\Microsoft\Edge\User Data" --profile-directory="Profile 2" "https://www.bing.com"
-#> taskkill /IM msedge.exe /F
 
 SEARCH_BOX = (
     "#sb_form_q, input#sb_form_q, "
@@ -27,28 +38,25 @@ PAUSE_MIN = 8.0
 PAUSE_MAX = 16.0
 TYPE_DELAY_MIN_MS = 60
 TYPE_DELAY_MAX_MS = 120
-MOBILE_METRICS = {
-    "width": 390,
-    "height": 844,
-    "deviceScaleFactor": 3,
-    "mobile": True
-}
-MOBILE_UA = (
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-    "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-    "Version/17.0 Mobile/15E148 Safari/604.1"
-)
 
-def sleepy(a: float, b: float):
-    time.sleep(random.uniform(a, b))
+# ======================
+# UTILS
+# ======================
 
-def get_ws_url() -> str:
-    with urlopen(CDP_VERSION_URL) as r:
-        data = json.loads(r.read().decode("utf-8"))
-    ws = data.get("webSocketDebuggerUrl")
-    if not ws:
-        raise RuntimeError("webSocketDebuggerUrl non trovato. Avvia Edge con --remote-debugging-port=9222.")
-    return ws
+async def sleepy(a: float, b: float):
+    await asyncio.sleep(random.uniform(a, b))
+
+def ask_int(prompt: str) -> int:
+    while True:
+        s = input(prompt).strip()
+        try:
+            n = int(s)
+            if n < 0:
+                print("Inserisci un numero >= 0.")
+                continue
+            return n
+        except ValueError:
+            print("Inserisci un numero intero (es. 10).")
 
 def load_queries(path: Path) -> list[str]:
     if not path.exists():
@@ -69,17 +77,56 @@ def pick_queries(queries: list[str], count: int) -> list[str]:
         return random.sample(queries, k=count)
     return [random.choice(queries) for _ in range(count)]
 
-def ask_int(prompt: str) -> int:
-    while True:
-        s = input(prompt).strip()
+def cdp_version_url(port: int) -> str:
+    return f"http://{CDP_ADDR}:{port}/json/version"
+
+def wait_for_ws_url(port: int, timeout_s: float = 15.0) -> str:
+    """Aspetta che Edge esponga CDP su /json/version e ritorna webSocketDebuggerUrl."""
+    deadline = time.time() + timeout_s
+    last_err = None
+    while time.time() < deadline:
         try:
-            n = int(s)
-            if n < 0:
-                print("Inserisci un numero >= 0.")
-                continue
-            return n
-        except ValueError:
-            print("Inserisci un numero intero (es. 10).")
+            with urlopen(cdp_version_url(port)) as r:
+                data = json.loads(r.read().decode("utf-8"))
+            ws = data.get("webSocketDebuggerUrl")
+            if ws:
+                return ws
+        except Exception as e:
+            last_err = e
+        time.sleep(0.25)
+    raise RuntimeError(f"CDP non pronto su porta {port}. Ultimo errore: {last_err}")
+
+def launch_edge(profile_directory: str, start_url: str = "https://www.bing.com") -> subprocess.Popen:
+    """
+    Avvia Edge con CDP e un profilo specifico.
+    Usa REAL_EDGE_USER_DATA_DIR come base dei profili (Default, Profile 1, ...).
+    """
+    args = [
+        EDGE_EXE,
+        f"--remote-debugging-port={PORT}",
+        f"--remote-debugging-address={CDP_ADDR}",
+        f'--user-data-dir={REAL_EDGE_USER_DATA_DIR}',
+        f'--profile-directory={profile_directory}',
+        start_url,
+    ]
+    return subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+def terminate_process(proc: subprocess.Popen, timeout_s: float = 8.0):
+    """Chiude l'istanza Edge lanciata da noi."""
+    if proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+        proc.wait(timeout=timeout_s)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+# ======================
+# PLAYWRIGHT ACTIONS
+# ======================
 
 async def maybe_handle_cookies(page):
     await page.wait_for_timeout(400)
@@ -133,6 +180,7 @@ async def ensure_bing_ready(page):
     except Exception:
         pass
 
+    # fallback: prova ad aprire la search UI
     candidates = [
         "button[aria-label*='Search' i]",
         "a[aria-label*='Search' i]",
@@ -159,30 +207,10 @@ async def ensure_bing_ready(page):
         await maybe_handle_cookies(page)
         return await get_box(15000)
 
-#todo fix mobile emulation
-async def apply_mobile_emulation(page):
-    """
-    Apply mobile emulation *on the same logged-in profile* using CDP.
-    """
-    cdp = await page.context.new_cdp_session(page)
-    await cdp.send("Emulation.setDeviceMetricsOverride", MOBILE_METRICS)
-    await cdp.send("Emulation.setUserAgentOverride", {"userAgent": MOBILE_UA})
-    await cdp.send("Emulation.setTouchEmulationEnabled", {"enabled": True, "maxTouchPoints": 5})
-    return cdp
-
-async def clear_mobile_emulation(cdp):
-    try:
-        await cdp.send("Emulation.clearDeviceMetricsOverride")
-    except Exception:
-        pass
-    try:
-        await cdp.send("Emulation.setUserAgentOverride", {"userAgent": ""})
-    except Exception:
-        pass
-    try:
-        await cdp.send("Emulation.setTouchEmulationEnabled", {"enabled": False})
-    except Exception:
-        pass
+async def get_or_make_page(ctx):
+    if ctx.pages:
+        return ctx.pages[0]
+    return await ctx.new_page()
 
 async def run_searches(label: str, page, queries: list[str], count: int):
     chosen = pick_queries(queries, count)
@@ -225,40 +253,69 @@ async def run_searches(label: str, page, queries: list[str], count: int):
             except Exception:
                 pass
 
-            sleepy(PAUSE_MIN, PAUSE_MAX)
+            await sleepy(PAUSE_MIN, PAUSE_MAX)
 
         except PWTimeoutError:
             print(f"[WARN {label}] Timeout per: {q} (URL: {page.url})")
-            sleepy(PAUSE_MIN, PAUSE_MAX)
+            await sleepy(PAUSE_MIN, PAUSE_MAX)
             continue
 
+async def run_profile(profile_directory: str, label: str, queries: list[str], n_searches: int, leave_open: bool):
+    """
+    Avvia Edge su quel profilo, si attacca via CDP, fa le ricerche, poi:
+    - se leave_open=False chiude Playwright + termina il processo Edge
+    - se leave_open=True chiude solo Playwright (stacca) e lascia Edge aperto
+    """
+    proc = launch_edge(profile_directory, "https://www.bing.com")
+    try:
+        ws = wait_for_ws_url(PORT, timeout_s=20.0)
+
+        async with async_playwright() as p:
+            browser = await p.chromium.connect_over_cdp(ws)
+
+            # In attach CDP di solito c'è un solo context persistente
+            ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
+            page = await get_or_make_page(ctx)
+
+            await run_searches(label, page, queries, n_searches)
+
+            # Stacchiamo Playwright
+            await browser.close()
+
+        if not leave_open:
+            terminate_process(proc)
+    except Exception:
+        # se qualcosa va storto e dovevamo chiudere, chiudiamo comunque
+        if not leave_open:
+            terminate_process(proc)
+        raise
+
+# ======================
+# MAIN
+# ======================
+
 async def main():
-    desktop_n = ask_int("Quante ricerche DESKTOP? (0 per saltare): ")
-    mobile_n = ask_int("Quante ricerche TELEFONO (emulazione nella stessa sessione)? (0 per saltare): ")
+    default_n = ask_int("Quante ricerche sul profilo DEFAULT? (0 per saltare): ")
+    prof1_n = ask_int("Quante ricerche sul profilo PROFILE 1? (0 per saltare): ")
 
     script_dir = Path(__file__).resolve().parent
     queries = load_queries(script_dir / QUERIES_FILE)
 
-    async with async_playwright() as p:
-        browser = await p.chromium.connect_over_cdp(get_ws_url())
-        ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
-        if desktop_n > 0:
-            page = ctx.pages[0] if ctx.pages else await ctx.new_page()
-            await run_searches("DESKTOP", page, queries, desktop_n)
-        if mobile_n > 0:
-            mobile_page = await ctx.new_page()
-            await mobile_page.goto("https://www.bing.com", wait_until="domcontentloaded")
+    # 1) Default: fa ricerche e CHIUDE Edge
+    if default_n > 0:
+        print("\n=== PROFILO: Default (chiusura a fine) ===")
+        await run_profile("Default", "DEFAULT", queries, default_n, leave_open=False)
+    else:
+        print("\n[DEFAULT] Saltato.")
 
-            cdp = await apply_mobile_emulation(mobile_page)
-            try:
-                await mobile_page.reload(wait_until="domcontentloaded")
-                await run_searches("TELEFONO_UI", mobile_page, queries, mobile_n)
-            finally:
-                await clear_mobile_emulation(cdp)
-    print("Fine.")
+    # 2) Profile 1: fa ricerche e LASCIA Edge APERTO
+    if prof1_n > 0:
+        print("\n=== PROFILO: Profile 1 (resta aperto) ===")
+        await run_profile("Profile 1", "PROFILE_1", queries, prof1_n, leave_open=True)
+    else:
+        print("\n[PROFILE 1] Saltato.")
+
+    print("\nFine. (Se hai eseguito Profile 1, Edge rimane aperto.)")
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
-
